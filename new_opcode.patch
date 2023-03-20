@@ -1,0 +1,130 @@
+From bb98a013be4592a65d7d31cd6f05ab67d63eeb9b Mon Sep 17 00:00:00 2001
+From: Irina Makarova <irisha-makarova_@mail.ru>
+Date: Mon, 20 Mar 2023 19:28:11 +0300
+Subject: [PATCH] Optimize python interpreter. LOAD_FAST + LOAD_CONST =
+ LOAD_OTUS
+
+---
+ Include/opcode.h        |  1 +
+ Lib/opcode.py           |  1 +
+ Python/ceval.c          | 19 +++++++++++++++++++
+ Python/opcode_targets.h |  2 +-
+ Python/peephole.c       | 14 +++++++++++++-
+ 5 files changed, 35 insertions(+), 2 deletions(-)
+ mode change 100644 => 100755 Include/opcode.h
+ mode change 100644 => 100755 Lib/opcode.py
+ mode change 100644 => 100755 Python/ceval.c
+ mode change 100644 => 100755 Python/opcode_targets.h
+ mode change 100644 => 100755 Python/peephole.c
+
+diff --git a/Include/opcode.h b/Include/opcode.h
+old mode 100644
+new mode 100755
+index fc6cbf3a7a..7cf3a5cdb8
+--- a/Include/opcode.h
++++ b/Include/opcode.h
+@@ -127,6 +127,7 @@ extern "C" {
+ #define BUILD_TUPLE_UNPACK_WITH_CALL 158
+ #define LOAD_METHOD             160
+ #define CALL_METHOD             161
++#define LOAD_OTUS             162
+ 
+ /* EXCEPT_HANDLER is a special, implicit block type which is created when
+    entering an except handler. It is not an opcode but we define it here
+diff --git a/Lib/opcode.py b/Lib/opcode.py
+old mode 100644
+new mode 100755
+index 368472d981..f1f81b339e
+--- a/Lib/opcode.py
++++ b/Lib/opcode.py
+@@ -213,5 +213,6 @@ def_op('BUILD_TUPLE_UNPACK_WITH_CALL', 158)
+ 
+ name_op('LOAD_METHOD', 160)
+ def_op('CALL_METHOD', 161)
++def_op('LOAD_OTUS', 162)
+ 
+ del def_op, name_op, jrel_op, jabs_op
+diff --git a/Python/ceval.c b/Python/ceval.c
+old mode 100644
+new mode 100755
+index 634edbaec0..222d34abf9
+--- a/Python/ceval.c
++++ b/Python/ceval.c
+@@ -1092,6 +1092,25 @@ _PyEval_EvalFrameDefault(PyFrameObject *f, int throwflag)
+             FAST_DISPATCH();
+         }
+ 
++        TARGET(LOAD_OTUS) {
++            PyObject *value = GETLOCAL(0);
++
++            if (value == NULL) {
++                format_exc_check_arg(PyExc_UnboundLocalError,
++                                     UNBOUNDLOCAL_ERROR_MSG,
++                                     PyTuple_GetItem(co->co_varnames, 0));
++                printf("Error in target");
++                goto error;
++            }
++            Py_INCREF(value);
++            PUSH(value);
++
++            value = GETITEM(consts, oparg);
++            Py_INCREF(value);
++            PUSH(value);
++            FAST_DISPATCH();
++        }
++
+         PREDICTED(STORE_FAST);
+         TARGET(STORE_FAST) {
+             PyObject *value = POP();
+diff --git a/Python/opcode_targets.h b/Python/opcode_targets.h
+old mode 100644
+new mode 100755
+index da6d032bce..eab4070ef4
+--- a/Python/opcode_targets.h
++++ b/Python/opcode_targets.h
+@@ -161,7 +161,7 @@ static void *opcode_targets[256] = {
+     &&_unknown_opcode,
+     &&TARGET_LOAD_METHOD,
+     &&TARGET_CALL_METHOD,
+-    &&_unknown_opcode,
++    &&TARGET_LOAD_OTUS,
+     &&_unknown_opcode,
+     &&_unknown_opcode,
+     &&_unknown_opcode,
+diff --git a/Python/peephole.c b/Python/peephole.c
+old mode 100644
+new mode 100755
+index 95b3dbb6bf..89daf2f534
+--- a/Python/peephole.c
++++ b/Python/peephole.c
+@@ -240,7 +240,7 @@ PyCode_Optimize(PyObject *code, PyObject* consts, PyObject *names,
+     unsigned int cum_orig_offset, last_offset;
+     Py_ssize_t tabsiz;
+     // Count runs of consecutive LOAD_CONSTs
+-    unsigned int cumlc = 0, lastlc = 0;
++    unsigned int cumlc = 0, lastlc = 0, current_value = 0, const_value = 0;
+     unsigned int *blocks = NULL;
+ 
+     /* Bail out if an exception is set */
+@@ -301,6 +301,18 @@ PyCode_Optimize(PyObject *code, PyObject* consts, PyObject *names,
+                 /* Skip over LOAD_CONST trueconst
+                    POP_JUMP_IF_FALSE xx.  This improves
+                    "while 1" performance.  */
++
++            case LOAD_FAST:
++                current_value = get_arg(codestr, i);
++                const_value = get_arg(codestr, i + 1);
++
++                if (current_value == 0 && nextop == LOAD_CONST) {
++                    codestr[i] = NOP;
++                    codestr[i + 1] = LOAD_OTUS;
++                    set_arg(codestr, i + 1, const_value);
++                }
++                break;
++
+             case LOAD_CONST:
+                 cumlc = lastlc + 1;
+                 if (nextop != POP_JUMP_IF_FALSE  ||
+-- 
+2.34.1
+
